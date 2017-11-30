@@ -659,16 +659,6 @@ private:
     };
     mutable Mutex mBufferingStatsMutex;
     std::unordered_map<std::string, BufferingStats> mBufferingStats;
-
-    FrameRateHelper mFrameRateHelper;
-
-    /*
-     * A number that increases on every new frame composition and screen capture.
-     * LayerBlur can speed up it's drawing by caching texture using this variable
-     * if multiple LayerBlur objects draw in one frame composition.
-     * In case of display mirroring, this variable should be increased on every display.
-     */
-    uint32_t mActiveFrameSequence;
 };
 
 }; // namespace android
