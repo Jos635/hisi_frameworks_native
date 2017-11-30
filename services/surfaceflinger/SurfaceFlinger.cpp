@@ -1279,7 +1279,7 @@ void SurfaceFlinger::rebuildLayerStacks() {
             const Transform& tr(displayDevice->getTransform());
             const Rect bounds(displayDevice->getBounds());
             if (displayDevice->isDisplayOn()) {
-                SurfaceFlinger::computeVisibleRegions(displayDevice->getHwcDisplayId(), layers,
+                SurfaceFlinger::computeVisibleRegions(dpy, layers,
                         displayDevice->getLayerStack(), dirtyRegion,
                         opaqueRegion);
 
@@ -1839,7 +1839,7 @@ void SurfaceFlinger::commitTransaction()
     mTransactionCV.broadcast();
 }
 
-void SurfaceFlinger::computeVisibleRegions(size_t /* dpy */,
+void SurfaceFlinger::computeVisibleRegions(size_t /*dpy*/,
         const LayerVector& currentLayers, uint32_t layerStack,
         Region& outDirtyRegion, Region& outOpaqueRegion)
 {
@@ -2339,8 +2339,7 @@ void SurfaceFlinger::setTransactionState(
         if (s.client != NULL) {
             sp<IBinder> binder = IInterface::asBinder(s.client);
             if (binder != NULL) {
-                String16 desc(binder->getInterfaceDescriptor());
-                if (desc == ISurfaceComposerClient::descriptor) {
+                if (binder->queryLocalInterface(ISurfaceComposerClient::descriptor) != NULL) {
                     sp<Client> client( static_cast<Client *>(s.client.get()) );
                     transactionFlags |= setClientStateLocked(client, s.state);
                 }

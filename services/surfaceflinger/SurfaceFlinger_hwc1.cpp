@@ -65,7 +65,6 @@
 #include <private/gui/SyncFeatures.h>
 
 #include "./DisplayUtils.h"
-
 #include <set>
 
 #include "Client.h"
@@ -203,6 +202,10 @@ SurfaceFlinger::SurfaceFlinger()
     property_get("debug.sf.disable_hwc_vds", value, "0");
     mUseHwcVirtualDisplays = !atoi(value);
     ALOGI_IF(!mUseHwcVirtualDisplays, "Disabling HWC virtual displays");
+
+    // we store the value as orientation:
+    // 90 -> 1, 180 -> 2, 270 -> 3
+    mHardwareRotation = property_get_int32("ro.sf.hwrotation", 0) / 90;
 }
 
 void SurfaceFlinger::onFirstRef()
@@ -483,7 +486,7 @@ void SurfaceFlinger::init() {
                 sfVsyncPhaseOffsetNs, true, "sf");
         mSFEventThread = new EventThread(sfVsyncSrc, *this);
         mEventQueue.setEventThread(mSFEventThread);
-
+		
        // set SFEventThread to SCHED_FIFO to minimize jitter
        struct sched_param param = {0};
        param.sched_priority = 2;
@@ -495,7 +498,7 @@ void SurfaceFlinger::init() {
                          vsyncPhaseOffsetNs, true, "sf-app");
         mEventThread = new EventThread(vsyncSrc, *this);
         mEventQueue.setEventThread(mEventThread);
-
+		
        // set EventThread to SCHED_FIFO to minimize jitter
        struct sched_param param = {0};
        param.sched_priority = 2;
@@ -675,16 +678,13 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
             info.orientation = 0;
         }
 
-        char value[PROPERTY_VALUE_MAX];
-        property_get("ro.sf.hwrotation", value, "0");
-        int additionalRot = atoi(value) / 90;
-        if ((type == DisplayDevice::DISPLAY_PRIMARY) && (additionalRot & DisplayState::eOrientationSwapMask)) {
+        if ((type == DisplayDevice::DISPLAY_PRIMARY) &&
+                (mHardwareRotation & DisplayState::eOrientationSwapMask)) {
             info.h = hwConfig.width;
             info.w = hwConfig.height;
             info.xdpi = ydpi;
             info.ydpi = xdpi;
-        }
-        else {
+        } else {
             info.w = hwConfig.width;
             info.h = hwConfig.height;
             info.xdpi = xdpi;
@@ -855,10 +855,53 @@ status_t SurfaceFlinger::getAnimationFrameStats(FrameStats* outStats) const {
     return NO_ERROR;
 }
 
-status_t SurfaceFlinger::getHdrCapabilities(const sp<IBinder>& /*display*/,
+status_t SurfaceFlinger::getHdrCapabilities(const sp<IBinder>& display,
         HdrCapabilities* outCapabilities) const {
-    // HWC1 does not provide HDR capabilities
+
+    if (!display.get())
+        return NAME_NOT_FOUND;
+
+    int32_t type = NAME_NOT_FOUND;
+    for (int i=0 ; i < DisplayDevice::NUM_BUILTIN_DISPLAY_TYPES ; i++) {
+        if (display == mBuiltinDisplays[i]) {
+            type = i;
+            break;
+        }
+    }
+
+    if (type < 0) {
+        return type;
+    }
+
+#ifdef QTI_BSP
+    // Call into display.qservice
+    Parcel reply;
+    sp<IServiceManager> sm(defaultServiceManager());
+    sp<IBinder> binder =
+        sm->getService(String16("display.qservice"));
+    Parcel input;
+    input.writeInterfaceToken(String16("android.display.IQService"));
+    input.writeInt32(type);
+    // GET_HDR_CAPABILITIES = 35 from IQService.h
+    binder->transact(35, input, &reply);
+    if (outCapabilities != nullptr) {
+        outCapabilities->readFromParcel(&reply);
+        if (outCapabilities->getSupportedHdrTypes().size() != 0) {
+            ALOGD("HDR support on display: %d", type);
+            for (auto hdrtype : outCapabilities->getSupportedHdrTypes()) {
+                ALOGD(" HDR type: %d", hdrtype);
+            }
+            ALOGD(" HDR max luminance: %f", outCapabilities->getDesiredMaxLuminance());
+            ALOGD(" HDR max avg luminance: %f",
+                  outCapabilities->getDesiredMaxAverageLuminance());
+            ALOGD(" HDR min luminance: %f", outCapabilities->getDesiredMinLuminance());
+        } else {
+            ALOGI("HDR is not supported on display: %d", type);
+        }
+    }
+#else
     *outCapabilities = HdrCapabilities();
+#endif
     return NO_ERROR;
 }
 
@@ -1158,7 +1201,7 @@ void SurfaceFlinger::postComposition(nsecs_t refreshStartTime)
         mAnimFrameTracker.advanceFrame();
     }
 
-    dumpDrawCycle(true);
+    dumpDrawCycle(false);
 
     if (hw->getPowerMode() == HWC_POWER_MODE_OFF) {
         return;
@@ -2293,8 +2336,7 @@ void SurfaceFlinger::setTransactionState(
         if (s.client != NULL) {
             sp<IBinder> binder = IInterface::asBinder(s.client);
             if (binder != NULL) {
-                String16 desc(binder->getInterfaceDescriptor());
-                if (desc == ISurfaceComposerClient::descriptor) {
+                if (binder->queryLocalInterface(ISurfaceComposerClient::descriptor) != NULL) {
                     sp<Client> client( static_cast<Client *>(s.client.get()) );
                     transactionFlags |= setClientStateLocked(client, s.state);
                 }

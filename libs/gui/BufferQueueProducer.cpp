@@ -921,7 +921,11 @@ status_t BufferQueueProducer::queueBuffer(int slot,
 
     // Call back without the main BufferQueue lock held, but with the callback
     // lock held so we can ensure that callbacks occur in order
-    {
+
+    int connectedApi;
+    sp<Fence> lastQueuedFence;
+
+    { // scope for the lock
         Mutex::Autolock lock(mCallbackMutex);
         while (callbackTicket != mCurrentCallbackTicket) {
             mCallbackCondition.wait(mCallbackMutex);
@@ -933,20 +937,24 @@ status_t BufferQueueProducer::queueBuffer(int slot,
             frameReplacedListener->onFrameReplaced(item);
         }
 
+        connectedApi = mCore->mConnectedApi;
+        lastQueuedFence = std::move(mLastQueueBufferFence);
+
+        mLastQueueBufferFence = std::move(fence);
+        mLastQueuedCrop = item.mCrop;
+        mLastQueuedTransform = item.mTransform;
+
         ++mCurrentCallbackTicket;
         mCallbackCondition.broadcast();
     }
 
     // Wait without lock held
-    if (mCore->mConnectedApi == NATIVE_WINDOW_API_EGL) {
+    if (connectedApi == NATIVE_WINDOW_API_EGL) {
         // Waiting here allows for two full buffers to be queued but not a
         // third. In the event that frames take varying time, this makes a
         // small trade-off in favor of latency rather than throughput.
-        mLastQueueBufferFence->waitForever("Throttling EGL Production");
+        lastQueuedFence->waitForever("Throttling EGL Production");
     }
-    mLastQueueBufferFence = fence;
-    mLastQueuedCrop = item.mCrop;
-    mLastQueuedTransform = item.mTransform;
 
     return NO_ERROR;
 }
@@ -1113,18 +1121,22 @@ status_t BufferQueueProducer::connect(const sp<IProducerListener>& listener,
                     static_cast<uint32_t>(mCore->mQueue.size()),
                     mCore->mFrameCounter + 1);
 
-            // Set up a death notification so that we can disconnect
-            // automatically if the remote producer dies
-            if (listener != NULL &&
-                    IInterface::asBinder(listener)->remoteBinder() != NULL) {
-                status = IInterface::asBinder(listener)->linkToDeath(
-                        static_cast<IBinder::DeathRecipient*>(this));
-                if (status != NO_ERROR) {
-                    BQ_LOGE("connect: linkToDeath failed: %s (%d)",
-                            strerror(-status), status);
+            if (listener != NULL) {
+                // Set up a death notification so that we can disconnect
+                // automatically if the remote producer dies
+                if (IInterface::asBinder(listener)->remoteBinder() != NULL) {
+                    status = IInterface::asBinder(listener)->linkToDeath(
+                            static_cast<IBinder::DeathRecipient*>(this));
+                    if (status != NO_ERROR) {
+                        BQ_LOGE("connect: linkToDeath failed: %s (%d)",
+                                strerror(-status), status);
+                    }
+                    mCore->mLinkedToDeath = listener;
+                }
+                if (listener->needsReleaseNotify()) {
+                    mCore->mConnectedProducerListener = listener;
                 }
             }
-            mCore->mConnectedProducerListener = listener;
             break;
         default:
             BQ_LOGE("connect: unknown API %d", api);
@@ -1186,9 +1198,9 @@ status_t BufferQueueProducer::disconnect(int api, DisconnectMode mode) {
                     mCore->freeAllBuffersLocked();
 
                     // Remove our death notification callback if we have one
-                    if (mCore->mConnectedProducerListener != NULL) {
+                    if (mCore->mLinkedToDeath != NULL) {
                         sp<IBinder> token =
-                                IInterface::asBinder(mCore->mConnectedProducerListener);
+                                IInterface::asBinder(mCore->mLinkedToDeath);
                         // This can fail if we're here because of the death
                         // notification, but we just ignore it
                         token->unlinkToDeath(
@@ -1196,6 +1208,7 @@ status_t BufferQueueProducer::disconnect(int api, DisconnectMode mode) {
                     }
                     mCore->mSharedBufferSlot =
                             BufferQueueCore::INVALID_BUFFER_SLOT;
+                    mCore->mLinkedToDeath = NULL;
                     mCore->mConnectedProducerListener = NULL;
                     mCore->mConnectedApi = BufferQueueCore::NO_CONNECTED_API;
                     mCore->mConnectedPid = -1;
@@ -1352,6 +1365,7 @@ status_t BufferQueueProducer::setGenerationNumber(uint32_t generationNumber) {
 
 String8 BufferQueueProducer::getConsumerName() const {
     ATRACE_CALL();
+    Mutex::Autolock lock(mCore->mMutex);
     BQ_LOGV("getConsumerName: %s", mConsumerName.string());
     return mConsumerName;
 }
