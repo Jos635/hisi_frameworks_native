@@ -2706,7 +2706,7 @@ void SurfaceFlinger::setPowerModeInternal(const sp<DisplayDevice>& hw,
     ALOGD("Set power mode=%d, type=%d flinger=%p", mode, hw->getDisplayType(),
             this);
 
-    if (mode == 2) //Awaking the lcd
+    if (hw->getPowerMode() == 0 && mode != 0) // Display enters either ambient state or fully on state
     {
 	int fd, ret;
 	fd = open("/dev/graphics/fb0",O_WRONLY);
